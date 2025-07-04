@@ -129,6 +129,9 @@ def run_tuners(filename, budget=20, seed=0):
     xs = []
     results = []
 
+    # 新增：记录score的最大值和最小值（用于归一化）
+    score_min = float('inf')  # 最小分数（最优性能）
+    score_max = -float('inf')  # 最大分数（最差性能）
     # 开始HABO调优
     for loop in range(budget):
         # 生成新配置，并直接获取本轮选中的超级臂和子臂
@@ -139,9 +142,24 @@ def run_tuners(filename, budget=20, seed=0):
         # 评估配置
         score, _ = get_objective_score_with_similarity(dict_search, current_config_values )
 
+        # 动态更新score的最大/最小值
+        if score < score_min:
+            score_min = score
+        if score > score_max:
+            score_max = score
+
+        # 奖励归一化：将score映射到 [0, 1] 区间，性能越好（score越小），奖励越高
+        # 处理极端情况（所有score相同）
+        if score_max == score_min:
+            reward = 0.5  # 若所有分数相同，奖励设为中间值
+        else:
+            # 公式：reward = (score_max - score) / (score_max - score_min)
+            # 逻辑：score越小 → (score_max - score) 越大 → reward越接近1（最高奖励）
+            reward = (score_max - score) / (score_max - score_min)
+
         # 更新调优器的权重（使用本轮明确选中的超级臂和子臂）
         #score是奖励，性能越好，奖励越高。而我这个数据集表示性能越好，数值越低，因此给它取个相反数
-        tuner.update_weights(selected_super_arm, selected_sub_arm, -score)
+        tuner.update_weights(selected_super_arm, selected_sub_arm, reward)
 
         # 记录配置和性能结果
         xs.append(current_config_values)  # 存储为列表

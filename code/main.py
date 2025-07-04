@@ -8,6 +8,7 @@ if __name__ == "__main__":
         "seed": 1,
         "filename": "D:/MyProj/PythonProj/CrossDomainTuners/code/algorithmDatasets/cifar10_modified.csv",
     }
-    #123123
-    result = run_with_budget(HABO.run_tuners, **kwargs)
+    #D:/MyProj/PythonProj/CrossDomainTuners/code/systemDatasets/7z.csv
+    #D:/MyProj/PythonProj/CrossDomainTuners/code/algorithmDatasets/cifar10_modified.csv
+    result = run_with_budget(RandomSearch.run_tuners, **kwargs)
     print(f"调优结果: {result}")
