@@ -2,17 +2,6 @@ import random
 import numpy as np
 from ReadDataset import get_data
 from QueryDataset import get_objective_score_with_similarity
-# 导入参数类型推断函数
-from util.InferParamType import _infer_param_type
-
-
-def is_enum_param(param_values):
-    """判断参数是否为枚举类型（基于_infer_param_type的结果）
-    枚举类型包括：categorical, ordinal, boolean
-    数值类型包括：continuous, discrete
-    """
-    param_type = _infer_param_type(param_values)
-    return param_type in ['categorical', 'ordinal', 'boolean']
 
 
 def enum_to_numeric(enum_values):
@@ -39,23 +28,13 @@ def divide_parameter_ranges(param_values, k):
     """将参数取值范围划分为k个区间（支持数值型和枚举型）
     论文4.1节：DDS核心逻辑，确保每个区间在样本中至少出现一次
     """
-    # 原有逻辑：基于 _infer_param_type 判断类型
-    if is_enum_param(param_values):
-        numeric_values, _, _ = enum_to_numeric(param_values)
-        sorted_values = sorted(numeric_values)
-        param_min, param_max = sorted_values[0], sorted_values[-1]
-    else:
-        # 数值型参数（确保无字符串）
-        sorted_values = sorted(param_values)
-        param_min, param_max = sorted_values[0], sorted_values[-1]
+    numeric_values, enum_map, unique_enums = enum_to_numeric(param_values)
+    sorted_values = sorted(numeric_values)
+    param_min, param_max = sorted_values[0], sorted_values[-1]
 
     # 若参数可能值数量≤k：每个值作为独立区间（离散场景）
     if len(sorted_values) <= k:
-        if is_enum_param(param_values):
-            unique_enums = list(dict.fromkeys(param_values))
-            return [[enum] for enum in unique_enums]  # 枚举值保留原始类型
-        else:
-            return [[v] for v in sorted_values]  # 数值型直接使用
+        return [[enum] for enum in unique_enums]  # 枚举值保留原始类型
 
     # 连续值场景：按参数理论范围均匀划分
     step = (param_max - param_min) / k  # 区间步长
@@ -77,13 +56,9 @@ def generate_dds_samples(independent_set, num_samples):
 
     # 预处理每个参数：划分区间并记录类型信息
     for values in independent_set:
-        if is_enum_param(values):
-            numeric_values, enum_map, unique_enums = enum_to_numeric(values)
-            param_enum_info.append((enum_map, unique_enums))
-            ranges = divide_parameter_ranges(numeric_values, k)
-        else:
-            param_enum_info.append(None)
-            ranges = divide_parameter_ranges(values, k)
+        numeric_values, enum_map, unique_enums = enum_to_numeric(values)
+        param_enum_info.append((enum_map, unique_enums))
+        ranges = divide_parameter_ranges(values, k)
         param_ranges.append(ranges)
 
     # 生成样本：第i个样本选择第i个区间（分散策略）
@@ -102,31 +77,18 @@ def generate_dds_samples(independent_set, num_samples):
             else:
                 r_start = r_end = current_range  # 异常处理
 
-            # 处理枚举参数：数值采样后映射回枚举值
-            if param_enum_info[p_idx] is not None:
-                enum_map, unique_enums = param_enum_info[p_idx]
+            enum_map, unique_enums = param_enum_info[p_idx]
 
-                # 确保边界是数值类型
-                if isinstance(r_start, str) or isinstance(r_end, str):
-                    # 如果边界是字符串，转换为数值
-                    r_start = enum_map.get(r_start, 0)
-                    r_end = enum_map.get(r_end, len(unique_enums) - 1)
-                # 在数值区间内采样
-                val = random.uniform(float(r_start), float(r_end))
-                # 将采样值映射回枚举值
-                sample.append(numeric_to_enum(val, unique_enums))
-            else:
-                # 处理数值型参数（continuous/discrete）
-                if r_start == r_end:
-                    sample.append(r_start)  # 离散值直接取值
-                else:
-                    # 整数参数用整数采样，浮点数用均匀采样
-                    if all(isinstance(v, int) for v in independent_set[p_idx]):
-                        val = random.randint(int(r_start), int(r_end))
-                    else:
-                        val = random.uniform(r_start, r_end)
-                        val = int(round(val)) if all(isinstance(v, int) for v in independent_set[p_idx]) else val
-                    sample.append(val)
+            # 确保边界是数值类型
+            if isinstance(r_start, str) or isinstance(r_end, str):
+                # 如果边界是字符串，转换为数值
+                r_start = enum_map.get(r_start, 0)
+                r_end = enum_map.get(r_end, len(unique_enums) - 1)
+            # 在数值区间内采样
+            val = random.uniform(float(r_start), float(r_end))
+            # 将采样值映射回枚举值
+            sample.append(numeric_to_enum(val, unique_enums))
+
         samples.append(sample)
     return samples
 
@@ -138,30 +100,11 @@ def get_bounded_space(current_best, independent_set, other_samples, expand_facto
     """
     bounded_space = []
     for p_idx, (current_val, param_values) in enumerate(zip(current_best, independent_set)):
-        # 检查当前参数值是否为字符串（却被当作数值型处理）
-        if not is_enum_param(param_values) and isinstance(current_val, str):
-            # 强制将字符串参数视为枚举型处理
-            _, enum_map, unique_enums = enum_to_numeric(param_values)
-            current_numeric = enum_map[current_val]
-            other_numerics = [enum_map[s[p_idx]] for s in other_samples if s[p_idx] in enum_map]
-            sorted_others = sorted(other_numerics)
-            global_min, global_max = 0, len(unique_enums) - 1
-        else:
-            # 原有逻辑：区分枚举型和数值型
-            if is_enum_param(param_values):
-                _, enum_map, unique_enums = enum_to_numeric(param_values)
-                current_numeric = enum_map[current_val]
-                other_numerics = [enum_map[s[p_idx]] for s in other_samples if s[p_idx] in enum_map]
-                sorted_others = sorted(other_numerics)
-                global_min, global_max = 0, len(unique_enums) - 1
-            else:
-                # 确保数值型参数值不是字符串
-                if isinstance(current_val, str):
-                    raise ValueError(f"参数{p_idx}的值为字符串 {current_val}，但被误判为数值型")
-                current_numeric = current_val
-                other_numerics = [s[p_idx] for s in other_samples if not isinstance(s[p_idx], str)]  # 过滤字符串
-                sorted_others = sorted(other_numerics)
-                global_min, global_max = min(param_values), max(param_values)
+        _, enum_map, unique_enums = enum_to_numeric(param_values)
+        current_numeric = enum_map[current_val]
+        other_numerics = [enum_map[s[p_idx]] for s in other_samples if s[p_idx] in enum_map]
+        sorted_others = sorted(other_numerics)
+        global_min, global_max = 0, len(unique_enums) - 1
 
         # 计算左右边界（论文4.2节定义）
         left = -float('inf')
@@ -181,26 +124,20 @@ def get_bounded_space(current_best, independent_set, other_samples, expand_facto
         right = right + (right - current_numeric) * expand_factor if right != global_max else global_max
 
         # 生成边界内的候选值
-        if is_enum_param(param_values):
-            # 枚举值：筛选数值在(left, right)范围内的枚举
-            candidates = [enum for enum in unique_enums if left < enum_map[enum] < right]
-            candidates = candidates if candidates else unique_enums  # 兜底
-        else:
-            # 数值型：筛选在(left, right)范围内的值
-            candidates = [v for v in param_values if left < v < right]
-            candidates = candidates if candidates else param_values  # 兜底
+        candidates = [enum for enum in unique_enums if left < enum_map[enum] < right]
+        candidates = candidates if candidates else unique_enums  # 兜底
         bounded_space.append(candidates)
     return bounded_space
 
 
-def run_tuners(filename, budget=20, seed=0):
+def run_tuners(file ,  budget=20, seed=0):
     """BestConfig主函数（论文3.2节闭环流程）"""
     total_rounds = 3
     random.seed(seed)
     np.random.seed(seed)
 
     # 读取数据集（论文3.1节：输入为配置-性能映射表）
-    file = get_data(filename)
+    #file = get_data(filename)
     independent_set = file.independent_set  # 参数取值范围
     dict_search = file.dict_search  # 配置-性能映射
 
@@ -213,12 +150,25 @@ def run_tuners(filename, budget=20, seed=0):
     used_budget = 0
     expand_factor = 1  # RBS边界扩展系数（初始为1，无改进时增大）
 
-    # 动态调整每轮采样数（论文5.4节：前期多采样，后期少采样）
-    samples_per_round = [max(1, int(budget * (total_rounds - i) / sum(range(1, total_rounds + 1))))
-                         for i in range(total_rounds)]
-    # 确保总采样数不超过预算
-    samples_per_round = [min(s, budget - sum(samples_per_round[:i]))
-                         for i, s in enumerate(samples_per_round)]
+    # 修正后：确保总和等于budget
+    sum_ratio = sum(range(1, total_rounds + 1))  # 3轮时为6
+    base_samples = []
+    remaining = budget  # 剩余预算，用于分配误差
+
+    # 先按比例分配整数部分
+    for i in range(total_rounds):
+        ratio = (total_rounds - i) / sum_ratio
+        base = int(budget * ratio)
+        base = max(1, base)  # 每轮至少1个样本
+        base_samples.append(base)
+        remaining -= base
+
+    # 将剩余预算分配给最后一轮（或按比例分配）
+    if remaining > 0:
+        base_samples[-1] += remaining  # 最后一轮多分配剩余部分
+
+    # 确保总采样数不超过预算（兜底）
+    samples_per_round = base_samples
 
     # 多轮迭代：采样-评估-优化
     for round_idx in range(total_rounds):
