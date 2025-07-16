@@ -2,7 +2,6 @@ import numpy as np
 from ReadDataset import get_data
 from QueryDataset import get_objective_score_with_similarity
 
-
 class HABOTuner:
     def __init__(self, hyperparameters: dict, gamma: float = 0.1):
         """
@@ -37,10 +36,8 @@ class HABOTuner:
             for arm, weight in self.super_weights.items()
         }
         # 基于概率选择超级臂
-        #首先将超级臂的名称和对应的选择概率分别提取为列表arms和probs；
         arms = list(probabilities.keys())
         probs = list(probabilities.values())
-        #然后使用np.random.choice(arms, p=probs)按照probs中定义的概率分布从arms中随机选择一个超级臂。
         selected_arm = np.random.choice(arms, p=probs)
         return selected_arm
 
@@ -49,11 +46,18 @@ class HABOTuner:
         sub_arms = self.hyperparameters[super_arm]
         sub_weights = self.sub_weights[super_arm]
         total_weight = sum(sub_weights.values())
-        # 计算子臂的选择概率：权重占比（无额外探索项，因超级臂选择已包含探索）
-        probabilities = {
-            sub_arm: weight / total_weight
-            for sub_arm, weight in sub_weights.items()
-        }
+
+        # 处理除零错误
+        if total_weight == 0:
+            num_sub_arms = len(sub_arms)
+            probabilities = {sub_arm: 1 / num_sub_arms for sub_arm in sub_arms}
+        else:
+            # 计算子臂的选择概率：权重占比
+            probabilities = {
+                sub_arm: weight / total_weight
+                for sub_arm, weight in sub_weights.items()
+            }
+
         # 基于概率选择子臂
         sub_arms_list = list(probabilities.keys())
         sub_probs = list(probabilities.values())
@@ -69,7 +73,6 @@ class HABOTuner:
         # 更新当前配置
         self.current_config[super_arm] = sub_arm
         # 返回当前完整配置（未更新的超参数保持上一轮取值，初始为None时需填充默认值）
-        # 注：若为首次调用，需为未选择的超参数填充初始值（如第一个取值）
         for arm in self.super_arms:
             if self.current_config[arm] is None:
                 self.current_config[arm] = self.hyperparameters[arm][0]
@@ -88,15 +91,23 @@ class HABOTuner:
         super_prob = (1 - self.gamma) * (
                 self.super_weights[selected_super_arm] / total_super_weight) + self.gamma / self.k
 
+        # 避免指数运算溢出
+        exp_super = self.gamma * reward / (self.k * super_prob)
+        if exp_super > 709:  # np.exp(709) 接近最大值
+            exp_super = 709
         # 更新超级臂权重：w ← w * exp(γ * reward / (k * P))
-        self.super_weights[selected_super_arm] *= np.exp(self.gamma * reward / (self.k * super_prob))
+        self.super_weights[selected_super_arm] *= np.exp(exp_super)
 
         # 计算子臂的选择概率（用于权重更新）
         total_sub_weight = sum(self.sub_weights[selected_super_arm].values())
         sub_prob = self.sub_weights[selected_super_arm][selected_sub_arm] / total_sub_weight
 
+        # 避免指数运算溢出
+        exp_sub = self.gamma * reward / sub_prob
+        if exp_sub > 709:
+            exp_sub = 709
         # 更新子臂权重：w ← w * exp(γ * reward / Q)
-        self.sub_weights[selected_super_arm][selected_sub_arm] *= np.exp(self.gamma * reward / sub_prob)
+        self.sub_weights[selected_super_arm][selected_sub_arm] *= np.exp(exp_sub)
 
     def reset(self) -> None:
         """重置调优器状态（用于新的调优任务）"""
@@ -108,39 +119,62 @@ class HABOTuner:
         self.current_config = {super_arm: None for super_arm in self.super_arms}
 
 
-def run_tuners(filename, budget=20, seed=0):
+def run_tuners(file, budget=20, seed=0):
     # 设置随机种子
     np.random.seed(seed)
-    # 读取数据集，这里可以指定训练集大小、是否打印详细信息
-    file = get_data(filename)
-    # 自变量的取值范围
+    # 读取数据集
+    # file = get_data(filename)
     independent_set = file.independent_set
-    # 决策与目标值的映射字典
     dict_search = file.dict_search
-    # 将自变量取值范围转换为HABO调优器所需的超参数配置格式
-    #将数据集的自变量取值范围转换为 HABO 框架中 “超级臂 - 子臂” 的结构。其中，每个自变量对应 HABO 中的一个 “超级臂”（超参数），用param_0、param_1等命名；自变量的所有可能取值则构成该超级臂下的 “子臂”（超参数的可能配置）
+    # 转换为HABO调优器所需的超参数格式
     hyperparameters = {f'param_{i}': values for i, values in enumerate(independent_set)}
     # 初始化HABO调优器
     tuner = HABOTuner(hyperparameters)
     # 初始化最优结果
     best_result = float('inf')
     best_config = None
-    best_loop = 0
+    best_step = 0
     xs = []
     results = []
 
-    # 新增：记录score的最大值和最小值（用于归一化）
-    score_min = float('inf')  # 最小分数（最优性能）
-    score_max = -float('inf')  # 最大分数（最差性能）
-    # 开始HABO调优
-    for loop in range(budget):
-        # 生成新配置，并直接获取本轮选中的超级臂和子臂
+    # 新增：记录历史配置（用于去重）
+    history_configs = set()  # 存储已生成的配置（元组形式，可哈希）
+    # 新增：记录score的最大/最小值（用于归一化）
+    score_min = float('inf')
+    score_max = -float('inf')
+
+    # 新增：重复配置计数器
+    repeat_count = 0
+    # 新增：最大重复次数阈值
+    max_repeats = 100 * budget
+
+    # 调整循环逻辑：直到消耗完预算且所有配置均为新配置
+    step = 0  # 有效步骤计数（仅统计新配置）
+    while step < budget:
+        # 检查是否达到最大重复次数
+        if repeat_count >= max_repeats:
+            print(f"警告: 已生成 {repeat_count} 次重复配置，达到阈值 {max_repeats}，提前终止搜索")
+            break
+
+        # 生成配置（可能重复）
         current_config, selected_super_arm, selected_sub_arm = tuner.generate_config()
-        # 将字典转换为列表，确保元素顺序与 independent_set 一致
         current_config_values = [current_config[f'param_{i}'] for i in range(len(independent_set))]
+        config_tuple = tuple(current_config_values)  # 转换为元组便于哈希存储
+
+        # 检查是否为重复配置
+        if config_tuple in history_configs:
+            print(f"步骤 {step + 1} 生成重复配置 {config_tuple}，重新生成...")
+            repeat_count += 1  # 增加重复计数
+            continue  # 重复配置不消耗预算，重新生成
+
+        # 重置重复计数（找到新配置）
+        repeat_count = 0
+
+        # 新配置：加入历史记录
+        history_configs.add(config_tuple)
 
         # 评估配置
-        score, _ = get_objective_score_with_similarity(dict_search, current_config_values )
+        score, _ = get_objective_score_with_similarity(dict_search, current_config_values)
 
         # 动态更新score的最大/最小值
         if score < score_min:
@@ -148,36 +182,34 @@ def run_tuners(filename, budget=20, seed=0):
         if score > score_max:
             score_max = score
 
-        # 奖励归一化：将score映射到 [0, 1] 区间，性能越好（score越小），奖励越高
-        # 处理极端情况（所有score相同）
+        # 奖励归一化：性能越好（score越小），奖励越高
         if score_max == score_min:
-            reward = 0.5  # 若所有分数相同，奖励设为中间值
+            reward = 0.5  # 所有分数相同时的默认奖励
         else:
-            # 公式：reward = (score_max - score) / (score_max - score_min)
-            # 逻辑：score越小 → (score_max - score) 越大 → reward越接近1（最高奖励）
             reward = (score_max - score) / (score_max - score_min)
 
-        # 更新调优器的权重（使用本轮明确选中的超级臂和子臂）
-        #score是奖励，性能越好，奖励越高。而我这个数据集表示性能越好，数值越低，因此给它取个相反数
+        # 更新权重（仅对新配置）
         tuner.update_weights(selected_super_arm, selected_sub_arm, reward)
 
-        # 记录配置和性能结果
-        xs.append(current_config_values)  # 存储为列表
+        # 记录结果
+        xs.append(current_config_values)
         results.append(score)
 
         # 更新最优结果
         if score < best_result:
             best_result = score
             best_config = current_config
-            best_loop = loop + 1
+            best_step = step + 1  # 记录最优结果出现的有效步骤
 
-        # 输出每一轮的详细信息
-        print(f"轮次: {loop + 1}")
+        # 输出有效步骤信息
+        print(f"有效步骤: {step + 1}/{budget}")
         print(f"当前配置: {current_config}")
         print(f"当前得分: {score}")
         print(f"当前最优得分: {best_result}")
         print(f"当前最优配置: {best_config}")
         print("-" * 50)
 
-    # 返回结果
-    return xs, results, range(1, budget + 1), best_result, best_loop, budget
+        # 有效步骤计数+1
+        step += 1
+
+    return xs, results, range(1, budget + 1), best_result, best_step, step
