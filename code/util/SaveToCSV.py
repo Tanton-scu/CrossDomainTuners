@@ -12,14 +12,8 @@ def run_with_budget(tuner_function, **kwargs):
     budget = kwargs.get('budget', 20)  # 默认预算为20
     seed = kwargs.get('seed', 0)  # 默认种子为0
     filename = kwargs.get('filename', '')
-    result = tuner_function(**kwargs)
-    # try:
-    #     # 调用传入的调优器函数，并传入所有参数
-    #
-    # except Exception as e:
-    #     print(f"调优过程中出现错误: {e}")
-    #     return None
-
+    file=kwargs.get('file', '')
+    result = tuner_function(budget,seed,file)
     # 处理结果并保存到CSV文件
     if isinstance(result, tuple):
         if len(result) == 3:  # 例如 ConEx, sampling, random, GA, best_config, GGA, E_search, paramILS
@@ -42,18 +36,29 @@ def run_with_budget(tuner_function, **kwargs):
         csv_file_path = os.path.join(save_dir, f'{func_filename}_{file_name_only}_seed{seed}.csv')
 
     with open(csv_file_path, 'w', newline="") as f:
-            csv_writer = csv.writer(f)
-            # 写入表头（如果需要）
-            #csv_writer.writerow(['轮次'] + ['配置' + str(i) for i in range(len(xs[0]))] + ['性能'])
-            #目前就是轮次+配置+性能；最后一行复现最佳性能
-            for i, (config, score) in enumerate(zip(xs, results)):
-                row = [i + 1] + config + [score]
-                csv_writer.writerow(row)
+        csv_writer = csv.writer(f)
+        # 写入表头（如果需要）
+        #csv_writer.writerow(['轮次'] + ['配置' + str(i) for i in range(len(xs[0]))] + ['性能'])
+        #目前就是轮次+配置+性能；最后一行复现最佳性能
+        for i, (config, score) in enumerate(zip(xs, results)):
+            #这两行代码把 config 列表里的所有元素以及 score 都转换为字符串类型。
+            config_str = [str(c) for c in config]
+            score_str = str(score)
+            row = [str(i + 1)] + config_str + [score_str]
+            csv_writer.writerow(row)
 
-            if best_loop is not None:
+        # 在 SaveToCSV.py 文件中
+        if best_loop is not None:
+            if best_loop - 1 < len(xs):
                 best_config = xs[best_loop - 1]
                 best_score = results[best_loop - 1]
-                last_row = [best_loop] + best_config + [best_score]
+                # 将 best_loop、best_config 中的元素和 best_score 都转换为字符串类型
+                best_loop_str = str(best_loop)
+                best_config_str = [str(c) for c in best_config]
+                best_score_str = str(best_score)
+                last_row = [best_loop_str] + best_config_str + [best_score_str]
                 csv_writer.writerow(last_row)
+            else:
+                print(f"Warning: best_loop ({best_loop}) is out of range of xs ({len(xs)}). Skipping best result row.")
 
     return result
